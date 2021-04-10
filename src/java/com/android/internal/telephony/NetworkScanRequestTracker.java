@@ -398,9 +398,15 @@ public final class NetworkScanRequestTracker {
                 return;
             }
             if (ar.exception == null && ar.result != null) {
+                /* UNISOC: Bug1173649 Register for scan results immediately while network scan is started,
+                 * because network can results indication is asynchronous, and sometimes may reported earlier than scan done @{*
+                 *
                 // Register for the scan results if the scan started successfully.
                 nsri.mPhone.mCi.registerForNetworkScanResult(mHandler,
                         EVENT_RECEIVE_NETWORK_SCAN_RESULT, nsri);
+                /* @{ */
+                Log.d(TAG,"startScanDone");
+                /* @} */
             } else {
                 logEmptyResultOrException(ar);
                 if (ar.exception != null) {
@@ -529,8 +535,8 @@ public final class NetworkScanRequestTracker {
         //   3. The live scan is not requested by mobile network setting menu
         private synchronized boolean interruptLiveScan(NetworkScanRequestInfo nsri) {
             if (mLiveRequestInfo != null && mPendingRequestInfo == null
-                    && nsri.mUid == Process.PHONE_UID
-                            && mLiveRequestInfo.mUid != Process.PHONE_UID) {
+                    && nsri.mUid == Process.SYSTEM_UID
+                            && mLiveRequestInfo.mUid != Process.SYSTEM_UID) {
                 doInterruptScan(mLiveRequestInfo.mScanId);
                 mPendingRequestInfo = nsri;
                 notifyMessenger(mLiveRequestInfo, TelephonyScanManager.CALLBACK_SCAN_ERROR,
@@ -549,8 +555,18 @@ public final class NetworkScanRequestTracker {
         private synchronized boolean startNewScan(NetworkScanRequestInfo nsri) {
             if (mLiveRequestInfo == null) {
                 mLiveRequestInfo = nsri;
+                /* UNISOC: Bug1173649 @{ */
+                if (nsri == null || nsri.mScanId != mLiveRequestInfo.mScanId){
+                    return false;
+                }
+                /* @} */
                 nsri.mPhone.startNetworkScan(nsri.getRequest(),
                         mHandler.obtainMessage(EVENT_START_NETWORK_SCAN_DONE, nsri));
+                /* UNISOC: Bug1173649 Register for scan results immediately while network scan is started,
+                 * because network scan results indication is asynchronous, sometimes may reported earlier than scan done @{*/
+                nsri.mPhone.mCi.registerForNetworkScanResult(mHandler,
+                        EVENT_RECEIVE_NETWORK_SCAN_RESULT, nsri);
+                /* @} */
                 return true;
             }
             return false;

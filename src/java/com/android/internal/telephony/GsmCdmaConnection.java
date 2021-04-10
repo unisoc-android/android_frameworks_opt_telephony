@@ -171,6 +171,7 @@ public class GsmCdmaConnection extends Connection {
         if (!isPhoneTypeGsm()) {
             Rlog.d(LOG_TAG, "[GsmCdmaConn] GsmCdmaConnection: dialString=" +
                     maskDialString(dialString));
+            mDialString = dialString;
             dialString = formatDialString(dialString);
             Rlog.d(LOG_TAG,
                     "[GsmCdmaConn] GsmCdmaConnection:formated dialString=" +
@@ -535,7 +536,9 @@ public class GsmCdmaConnection extends Connection {
 
             case CallFailCause.USER_ALERTING_NO_ANSWER:
                 return DisconnectCause.TIMED_OUT;
-
+            //UNISOC:add for bug839181
+            case CallFailCause.ANSWERED_ELSEWHERE:
+                return DisconnectCause.ANSWERED_ELSEWHERE;
             case CallFailCause.ACCESS_CLASS_BLOCKED:
             case CallFailCause.ERROR_UNSPECIFIED:
             case CallFailCause.NORMAL_CLEARING:
@@ -1210,4 +1213,10 @@ public class GsmCdmaConnection extends Connection {
     public boolean isOtaspCall() {
         return mAddress != null && OTASP_NUMBER.equals(mAddress);
     }
+
+    /*UNISOC: Add for UNISOC IMS implement@{ */
+    public int getGsmCdmaConnIndex() throws CallStateException {
+        return getGsmCdmaIndex();
+    }
+    /*@}*/
 }

@@ -135,6 +135,9 @@ public class ProxyController {
         RcsMessageStoreController.init(context);
 
         mUiccPhoneBookController = new UiccPhoneBookController(mPhones);
+        //UNISOC: Add for bug1072750, AndroidQ porting for USIM/SIM phonebook
+        new UiccPhoneBookControllerEx(mPhones);
+        new UiccSmsControllerEx(mPhones);
         mPhoneSubInfoController = new PhoneSubInfoController(mContext, mPhones);
         mSmsController = new SmsController(mContext);
         mSetRadioAccessFamilyStatus = new int[mPhones.length];

@@ -288,6 +288,7 @@ public class GsmCdmaPhone extends Phone {
                 // Only handle carrier config changes for this phone id.
                 if (mPhoneId == intent.getIntExtra(CarrierConfigManager.EXTRA_SLOT_INDEX, -1)) {
                     sendMessage(obtainMessage(EVENT_CARRIER_CONFIG_CHANGED));
+                    setCarrierConfigParameter(intent); //UNISOC: add for bug1033847
                 }
             } else if (TelecomManager.ACTION_CURRENT_TTY_MODE_CHANGED.equals(action)) {
                 int ttyMode = intent.getIntExtra(
@@ -612,9 +613,14 @@ public class GsmCdmaPhone extends Phone {
                 switch (getDcTracker(currentTransport).getState(apnType)) {
                     case CONNECTED:
                     case DISCONNECTING:
-                        if (mCT.mState != PhoneConstants.State.IDLE
+                        //UNISOC: bug599552 data icon shown under GSM when make emergency call
+                        if (getState() != PhoneConstants.State.IDLE
                                 && !mSST.isConcurrentVoiceAndDataAllowed()) {
                             ret = PhoneConstants.DataState.SUSPENDED;
+                        /* UNISOC: FEATURE_SUSPEND_DATA_WHEN_IN_CALL @{ */
+                        } else if (mDcTrackers.get(currentTransport).isSuspended()) {
+                            ret = PhoneConstants.DataState.SUSPENDED;
+                        /* @} */
                         } else {
                             ret = PhoneConstants.DataState.CONNECTED;
                         }
@@ -777,7 +783,11 @@ public class GsmCdmaPhone extends Phone {
     @Override
     public void registerForSuppServiceNotification(
             Handler h, int what, Object obj) {
-        mSsnRegistrants.addUnique(h, what, obj);
+        /* UNISOC: Explicit Transfer Call
+         * @Org: mSsnRegistrants.addUnique(h, what, obj);
+         *{ */
+        mSsnRegistrants.add(h, what, obj);
+        /* @} */
         if (mSsnRegistrants.size() == 1) mCi.setSuppServiceNotifications(true, null);
     }
 
@@ -933,6 +943,13 @@ public class GsmCdmaPhone extends Phone {
         // accpetCall() does.
         if ( imsPhone != null && imsPhone.getRingingCall().isRinging()) {
             return imsPhone.getRingingCall();
+        }
+        //UNISOC: add for bug890941
+        if (!mCT.mRingingCall.isRinging()
+                && mCT.getRingingHandoverConnection() != null
+                && mCT.getRingingHandoverConnection().getCall() != null
+                && mCT.getRingingHandoverConnection().getCall().isRinging()) {
+            return mCT.getRingingHandoverConnection().getCall();
         }
         return mCT.mRingingCall;
     }
@@ -1768,7 +1785,11 @@ public class GsmCdmaPhone extends Phone {
             if (use_usim) {
                 return (mSimRecords != null) ? mSimRecords.getMsisdnNumber() : null;
             }
-            return mSST.getMdnNumber();
+            if (!TextUtils.isEmpty(mSST.getMdnNumber())) {
+                return mSST.getMdnNumber();
+            } else {
+                return (mSimRecords != null) ? mSimRecords.getMsisdnNumber() : null;
+            }
         }
     }
 
@@ -2491,7 +2512,7 @@ public class GsmCdmaPhone extends Phone {
                 // Force update IMS service if it is available, if it isn't the config will be
                 // updated when ImsPhoneCallTracker opens a connection.
                 ImsManager imsManager = ImsManager.getInstance(mContext, mPhoneId);
-                if (imsManager.isServiceAvailable()) {
+                if (imsManager.isServiceAvailable() && /*UNISOC: add for bug1033847*/getCarrierConfigParameter()) {
                     imsManager.updateImsServiceConfig(true);
                 } else {
                     logd("ImsManager is not available to update CarrierConfig.");
@@ -2647,7 +2668,21 @@ public class GsmCdmaPhone extends Phone {
                 logd("Event EVENT_SSN Received");
                 if (isPhoneTypeGsm()) {
                     ar = (AsyncResult) msg.obj;
+                    /* UNISOC: add for Bug1112728&Bug1244296 @{ */
                     SuppServiceNotification not = (SuppServiceNotification) ar.result;
+                    GsmCdmaConnection conn = findConnection(not.index);
+                    if (conn != null) {
+                        // CODE_2 is valid only when type is NOTIFICATION_TYPE_CODE_2
+                        if (not.notificationType == SuppServiceNotification.NOTIFICATION_TYPE_CODE_2) {
+                            if (not.code == SuppServiceNotification.CODE_2_CALL_ON_HOLD) {
+                                conn.onConnectionEvent(android.telecom.Connection.EVENT_CALL_REMOTELY_HELD, null);
+                            } else if (not.code == SuppServiceNotification.CODE_2_CALL_RETRIEVED) {
+                                conn.onConnectionEvent(android.telecom.Connection.EVENT_CALL_REMOTELY_UNHELD, null);
+                            }
+                        }
+                    }
+
+                    /* @} */
                     mSsnRegistrants.notifyRegistrants(ar);
                 }
                 break;
@@ -3113,6 +3148,10 @@ public class GsmCdmaPhone extends Phone {
             r.registerForRecordsEvents(this, EVENT_ICC_RECORD_EVENTS, null);
             r.registerForRecordsLoaded(this, EVENT_SIM_RECORDS_LOADED, null);
         } else {
+            logd("registerForIccRecordEvents mSimRecords " + mSimRecords);
+            if(mSimRecords != null) {
+                mSimRecords.registerForRecordsEvents(this, EVENT_ICC_RECORD_EVENTS, null);
+            }
             r.registerForRecordsLoaded(this, EVENT_RUIM_RECORDS_LOADED, null);
             if (isPhoneTypeCdmaLte()) {
                 // notify simRecordsLoaded registrants for cdmaLte phone
@@ -3976,4 +4015,40 @@ public class GsmCdmaPhone extends Phone {
                 Settings.Secure.PREFERRED_TTY_MODE, TelecomManager.TTY_MODE_OFF);
         updateUiTtyMode(ttyMode);
     }
+
+    private GsmCdmaConnection findConnection(int index) {
+        GsmCdmaCall fgCall = getForegroundCall();
+        GsmCdmaCall bgCall = getBackgroundCall();
+        try {
+            GsmCdmaConnection conn = mCT.getConnectionByIndex(fgCall, index);
+            if (conn != null) {
+                return conn;
+            } else {
+                return mCT.getConnectionByIndex(bgCall, index);
+            }
+        } catch (CallStateException e) {
+            if (DBG) Rlog.d(LOG_TAG, "get connection error:", e);
+        }
+        return null;
+    }
+
+    /*UNISOC: modify by BUG 739621 @{ */
+    public void notifyServiceStateChanged() {
+        super.notifyServiceStateChangedP(getServiceState());
+    }
+    /* @} */
+    /*UNISOC: add for bug1033847 */
+    public void setCarrierConfigParameter(Intent intent) {
+    }
+
+    public boolean getCarrierConfigParameter() {
+        return true;
+    }
+    /*@}*/
+
+    /*UNISOC: add for bug1108786 @{*/
+    public void setVoWifiUnregister(){
+
+    }
+    /*@}*/
 }

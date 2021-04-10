@@ -97,6 +97,7 @@ import com.android.internal.telephony.dataconnection.DataConnection;
 import com.android.internal.telephony.dataconnection.DcTracker;
 import com.android.internal.telephony.dataconnection.TransportManager;
 import com.android.internal.telephony.metrics.TelephonyMetrics;
+import com.android.internal.telephony.TeleUtils;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppState;
 import com.android.internal.telephony.uicc.IccCardStatus.CardState;
 import com.android.internal.telephony.uicc.IccRecords;
@@ -107,6 +108,8 @@ import com.android.internal.telephony.uicc.UiccCardApplication;
 import com.android.internal.telephony.uicc.UiccController;
 import com.android.internal.telephony.uicc.UiccProfile;
 import com.android.internal.telephony.util.NotificationChannelController;
+import com.android.internal.telephony.imsphone.ImsPhoneCallTracker;
+import com.android.internal.telephony.imsphone.ImsPhone;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.IndentingPrintWriter;
 
@@ -506,6 +509,11 @@ public class ServiceStateTracker extends Handler {
                 }
                 return;
             }
+            //UNISOC:Modify the Bug1029213
+            if (intent.getAction().equals(Intent.ACTION_LOCALE_CHANGED)) {
+                // update emergency string whenever locale changed
+                updateSpnDisplay();
+            }
 
             // TODO: Remove this weird check left over from CDMA/GSM service state tracker merge.
             if (!mPhone.isPhoneTypeGsm()) {
@@ -513,10 +521,11 @@ public class ServiceStateTracker extends Handler {
                 return;
             }
 
-            if (intent.getAction().equals(Intent.ACTION_LOCALE_CHANGED)) {
+            /*if (intent.getAction().equals(Intent.ACTION_LOCALE_CHANGED)) {
                 // update emergency string whenever locale changed
                 updateSpnDisplay();
-            } else if (intent.getAction().equals(ACTION_RADIO_OFF)) {
+            } else*/
+            if (intent.getAction().equals(ACTION_RADIO_OFF)) {
                 mAlarmSwitch = false;
                 powerOffRadioSafely();
             }
@@ -1281,6 +1290,9 @@ public class ServiceStateTracker extends Handler {
 
             case EVENT_SIM_RECORDS_LOADED:
                 log("EVENT_SIM_RECORDS_LOADED: what=" + msg.what);
+                /*UNISOC: Feature bug 1098293  @{ */
+                mPhone.updateVoiceMail();
+                /*UNISOC @} */
                 updatePhoneObject();
                 updateOtaspState();
                 if (mPhone.isPhoneTypeGsm()) {
@@ -1354,20 +1366,6 @@ public class ServiceStateTracker extends Handler {
                     ar = (AsyncResult) msg.obj;
 
                     onRestrictedStateChanged(ar);
-                }
-                break;
-
-            case EVENT_ALL_DATA_DISCONNECTED:
-                int dds = SubscriptionManager.getDefaultDataSubscriptionId();
-                ProxyController.getInstance().unregisterForAllDataDisconnected(dds, this);
-                synchronized(this) {
-                    if (mPendingRadioPowerOffAfterDataOff) {
-                        if (DBG) log("EVENT_ALL_DATA_DISCONNECTED, turn radio off now.");
-                        hangupAndPowerOff();
-                        mPendingRadioPowerOffAfterDataOff = false;
-                    } else {
-                        log("EVENT_ALL_DATA_DISCONNECTED is stale");
-                    }
                 }
                 break;
 
@@ -1766,9 +1764,15 @@ public class ServiceStateTracker extends Handler {
             }
 
             if (err == CommandException.Error.RADIO_NOT_AVAILABLE) {
-                // Radio has crashed or turned off
-                cancelPollState();
-                return;
+                loge("handlePollStateResult exception " + err);
+                if (mCi.getRadioState() == TelephonyManager.RADIO_POWER_OFF
+                        && mSS.getState() != ServiceState.STATE_POWER_OFF) {
+                    loge("If radioState is off but service State not off, not return instead of notify servce state changed");
+                } else {
+                    loge("cancelPollState and return ");
+                    cancelPollState();
+                    return;
+                }
             }
 
             if (err != CommandException.Error.OP_NOT_ALLOWED_BEFORE_REG_NW) {
@@ -1997,15 +2001,17 @@ public class ServiceStateTracker extends Handler {
         NetworkRegistrationInfo wwanPsRegState = serviceState.getNetworkRegistrationInfo(
                 NetworkRegistrationInfo.DOMAIN_PS, AccessNetworkConstants.TRANSPORT_TYPE_WWAN);
 
+        /*UNISOC: 1140298, Solution defect caused by the unrealized logic of IWLAN handover*/
         // Check if any APN is preferred on IWLAN.
-        boolean isIwlanPreferred = mTransportManager.isAnyApnPreferredOnIwlan();
-        serviceState.setIwlanPreferred(isIwlanPreferred);
+        //boolean isIwlanPreferred = mTransportManager.isAnyApnPreferredOnIwlan();
+        //serviceState.setIwlanPreferred(isIwlanPreferred);
+        /*UNISOC: 1140298*/
         if (wlanPsRegState != null
                 && wlanPsRegState.getAccessNetworkTechnology()
                 == TelephonyManager.NETWORK_TYPE_IWLAN
                 && wlanPsRegState.getRegistrationState()
                 == NetworkRegistrationInfo.REGISTRATION_STATE_HOME
-                && isIwlanPreferred) {
+                /* && isIwlanPreferred */) {
             serviceState.setDataRegState(ServiceState.STATE_IN_SERVICE);
         } else if (wwanPsRegState != null) {
             // If the device is not camped on IWLAN, then we use cellular PS registration state
@@ -2598,6 +2604,13 @@ public class ServiceStateTracker extends Handler {
             wfcFlightSpnFormat = wfcSpnFormats[flightModeIdx];
         }
 
+        //UNISOC:Translation service provider name
+        TelephonyManager tm = (TelephonyManager) mPhone.getContext().getSystemService(
+                Context.TELEPHONY_SERVICE);
+        String networkOperatorName = TeleUtils.translateOperatorName(mSS.getOperatorNumeric()
+                ,mSS.getOperatorAlpha());
+        tm.setNetworkOperatorNameForPhone(mPhone.getPhoneId(), networkOperatorName);
+
         if (mPhone.isPhoneTypeGsm()) {
             // The values of plmn/showPlmn change in different scenarios.
             // 1) No service but emergency call allowed -> expected
@@ -2643,6 +2656,8 @@ public class ServiceStateTracker extends Handler {
             } else if (combinedRegState == ServiceState.STATE_IN_SERVICE) {
                 // In either home or roaming service
                 plmn = mSS.getOperatorAlpha();
+                //UNISOC:Translation service provider name
+                plmn = TeleUtils.translateOperatorName(mSS.getOperatorNumeric(),mSS.getOperatorAlpha());
                 showPlmn = !TextUtils.isEmpty(plmn) &&
                         ((rule & CARRIER_NAME_DISPLAY_BITMASK_SHOW_PLMN)
                                 == CARRIER_NAME_DISPLAY_BITMASK_SHOW_PLMN);
@@ -2661,6 +2676,9 @@ public class ServiceStateTracker extends Handler {
             //    EXTRA_SPN = spn
             //    EXTRA_DATA_SPN = dataSpn
             spn = getServiceProviderName();
+            //UNISOC:Translation service provider name
+            String simNumeric = (mIccRecords != null) ? mIccRecords.getOperatorNumeric() : "";
+            spn = TeleUtils.translateOperatorName(simNumeric, spn);
             dataSpn = spn;
             showSpn = !noService && !TextUtils.isEmpty(spn)
                     && ((rule & CARRIER_NAME_DISPLAY_BITMASK_SHOW_SPN)
@@ -2701,6 +2719,8 @@ public class ServiceStateTracker extends Handler {
 
             // mOperatorAlpha contains the ERI text
             plmn = mSS.getOperatorAlpha();
+            //UNISOC:Translation service provider name
+            plmn = TeleUtils.translateOperatorName(mSS.getOperatorNumeric(),mSS.getOperatorAlpha());
             if (DBG) log("updateSpnDisplay: cdma rawPlmn = " + plmn);
 
             showPlmn = plmn != null;
@@ -2726,6 +2746,17 @@ public class ServiceStateTracker extends Handler {
                 }
             }
 
+        }
+
+        // UNISOC Add: Operator Customize Wifi Calling Feature
+        if(!TextUtils.isEmpty(plmn) && plmn.equals(Resources.getSystem().
+                getText(com.android.internal.R.string.customize_operator_name_string).toString())
+                && mPhone.getImsPhone() != null
+                && mPhone.getImsPhone().isWifiCallingEnabled()) {
+            plmn = Resources.getSystem().
+                    getText(com.android.internal.R.string.customize_wfc_operator_name_string).toString();
+            showSpn = false;
+            showPlmn = true;
         }
 
         notifySpnDisplayUpdate(new CarrierDisplayNameData.Builder()
@@ -3263,7 +3294,8 @@ public class ServiceStateTracker extends Handler {
         if (hasChanged) {
             updateSpnDisplay();
 
-            tm.setNetworkOperatorNameForPhone(mPhone.getPhoneId(), mSS.getOperatorAlpha());
+            //UNISOC:Translation service provider name
+            //tm.setNetworkOperatorNameForPhone(mPhone.getPhoneId(),mSS.getOperatorAlpha());
             String operatorNumeric = mSS.getOperatorNumeric();
 
             if (!mPhone.isPhoneTypeGsm()) {
@@ -3291,6 +3323,12 @@ public class ServiceStateTracker extends Handler {
                 if (!mPhone.isPhoneTypeGsm()) {
                     setOperatorIdd(operatorNumeric);
                 }
+
+                /*UNISOC: bug618350 add single pdp allowed by plmns feature@{*/
+                if (hasVoiceRegStateChanged || hasDataRegStateChanged.get(AccessNetworkConstants.TRANSPORT_TYPE_WWAN)) {
+                    mPhone.getDcTracker(AccessNetworkConstants.TRANSPORT_TYPE_WWAN).setSinglePDNAllowedByNetwork();
+                }
+                /* @} */
 
                 mLocaleTracker.updateOperatorNumeric(operatorNumeric);
             }
@@ -4466,13 +4504,10 @@ public class ServiceStateTracker extends Handler {
     public void powerOffRadioSafely() {
         synchronized (this) {
             if (!mPendingRadioPowerOffAfterDataOff) {
-                int dds = SubscriptionManager.getDefaultDataSubscriptionId();
                 // To minimize race conditions we call cleanUpAllConnections on
-                // both if else paths instead of before this isDisconnected test.
-                if (mPhone.areAllDataDisconnected()
-                        && (dds == mPhone.getSubId()
-                        || (dds != mPhone.getSubId()
-                        && ProxyController.getInstance().areAllDataDisconnected(dds)))) {
+                //UNISOC: power off radio when dataconnection is disconnected on
+                // this phone, ignore the dataconnecton state on dds.
+                if (mPhone.areAllDataDisconnected()) {
                     // To minimize race conditions we do this after isDisconnected
                     for (int transport : mTransportManager.getAvailableTransports()) {
                         if (mPhone.getDcTracker(transport) != null) {
@@ -4489,6 +4524,9 @@ public class ServiceStateTracker extends Handler {
                         mPhone.mCT.mBackgroundCall.hangupIfAlive();
                         mPhone.mCT.mForegroundCall.hangupIfAlive();
                     }
+                    // UNISOC: Bug 1020803 Hang up all ims call
+                    hangupImsCall();
+
                     for (int transport : mTransportManager.getAvailableTransports()) {
                         if (mPhone.getDcTracker(transport) != null) {
                             mPhone.getDcTracker(transport).cleanUpAllConnections(
@@ -4496,15 +4534,6 @@ public class ServiceStateTracker extends Handler {
                         }
                     }
 
-                    if (dds != mPhone.getSubId()
-                            && !ProxyController.getInstance().areAllDataDisconnected(dds)) {
-                        if (DBG) log("Data is active on DDS.  Wait for all data disconnect");
-                        // Data is not disconnected on DDS. Wait for the data disconnect complete
-                        // before sending the RADIO_POWER off.
-                        ProxyController.getInstance().registerForAllDataDisconnected(dds, this,
-                                EVENT_ALL_DATA_DISCONNECTED);
-                        mPendingRadioPowerOffAfterDataOff = true;
-                    }
                     Message msg = Message.obtain(this);
                     msg.what = EVENT_SET_RADIO_POWER_OFF;
                     msg.arg1 = ++mPendingRadioPowerOffAfterDataOffTag;
@@ -4643,6 +4672,10 @@ public class ServiceStateTracker extends Handler {
         mPhone.setSignalStrengthReportingCriteria(
                 config.getIntArray(CarrierConfigManager.KEY_WCDMA_RSCP_THRESHOLDS_INT_ARRAY),
                 AccessNetworkType.UTRAN);
+        // UNISOC Add for bug1203813
+        mPhone.setSignalStrengthReportingCriteria(
+                config.getIntArray(CarrierConfigManager.KEY_GSM_RSSI_THRESHOLDS_INT_ARRAY),
+                AccessNetworkType.GERAN);
     }
 
     private void updateServiceStateLteEarfcnBoost(ServiceState serviceState, int lteEarfcn) {
@@ -4692,7 +4725,8 @@ public class ServiceStateTracker extends Handler {
             mPhone.mCT.mBackgroundCall.hangupIfAlive();
             mPhone.mCT.mForegroundCall.hangupIfAlive();
         }
-
+        // UNISOC: Bug 1020803 Hang up all ims call
+        hangupImsCall();
         mCi.setRadioPower(false, obtainMessage(EVENT_RADIO_POWER_OFF_DONE));
 
     }
@@ -5428,5 +5462,22 @@ public class ServiceStateTracker extends Handler {
             }
         }
         return operatorName;
+    }
+
+    // UNISOC: Bug 1020803 Hang up all ims call
+    private void hangupImsCall() {
+        ImsPhone imsPhone = (ImsPhone)(mPhone.getImsPhone());
+        if (imsPhone != null) {
+            log("hang up ims call");
+            if (imsPhone.isInCall()) {
+                if (mSS.getRilDataRadioTechnology() == ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN
+                        && imsPhone.isWifiCallingEnabled()) {
+                    return;
+                }
+                ((ImsPhoneCallTracker)(imsPhone.getCallTracker())).mRingingCall.hangupIfAlive();
+                ((ImsPhoneCallTracker)(imsPhone.getCallTracker())).mBackgroundCall.hangupIfAlive();
+                ((ImsPhoneCallTracker)(imsPhone.getCallTracker())).mForegroundCall.hangupIfAlive();
+            }
+        }
     }
 }

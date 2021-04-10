@@ -32,11 +32,17 @@ import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.content.Context;
 import android.content.Intent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.res.Resources;
+import android.database.ContentObserver;
 import android.os.Handler;
 import android.os.Message;
 import android.os.ParcelUuid;
 import android.provider.Settings;
 import android.provider.Settings.SettingNotFoundException;
+import android.provider.SettingsEx;
 import android.telephony.SubscriptionInfo;
 import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
@@ -45,6 +51,9 @@ import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.ArrayUtils;
+import com.android.internal.telephony.Phone;
+import com.android.internal.telephony.PrimarySubConfig;
+import com.android.internal.telephony.SimStateTracker;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -62,7 +71,7 @@ import java.util.stream.Collectors;
  *    become the new default.
  * 3) For primary subscriptions, only default data subscription will have MOBILE_DATA on.
  */
-public class MultiSimSettingController extends Handler {
+public class MultiSimSettingController extends Handler implements SimStateTracker.OnSimStateChangedListener  {
     private static final String LOG_TAG = "MultiSimSettingController";
     private static final boolean DBG = true;
     private static final int EVENT_USER_DATA_ENABLED                 = 1;
@@ -104,6 +113,14 @@ public class MultiSimSettingController extends Handler {
     private final SubscriptionController mSubController;
     // Keep a record of active primary (non-opportunistic) subscription list.
     @NonNull private List<Integer> mPrimarySubList = new ArrayList<>();
+    /** UNISOC:Add primary sub policy for MultiSimSetting  @{ */
+    private PrimarySubConfig mPrimarySubConfig;
+    private SimStateTracker mSimStateTracker;
+    private boolean mNeedPopUpSimSettings;
+    private boolean mHotSwap;
+    private boolean mIsIccChanged = false;
+    private boolean mIsFirstRun = true;
+    /** @} */
 
     /** The singleton instance. */
     private static MultiSimSettingController sInstance = null;
@@ -147,6 +164,15 @@ public class MultiSimSettingController extends Handler {
     public MultiSimSettingController(Context context, SubscriptionController sc) {
         mContext = context;
         mSubController = sc;
+        mPrimarySubConfig = PrimarySubConfig.init(context);
+        mSimStateTracker = SimStateTracker.init(context);
+        mSimStateTracker.addOnSimStateChangedListener(this);
+        context.getContentResolver().registerContentObserver(
+                Settings.Global.getUriFor(Settings.Global.DEVICE_PROVISIONED), false,
+                mSetupWizardCompleteObserver);
+        context.getContentResolver().registerContentObserver(
+                Settings.Global.getUriFor(SettingsEx.GlobalEx.RADIO_BUSY), false,
+                mRadioBusyObserver);
     }
 
     /**
@@ -258,6 +284,7 @@ public class MultiSimSettingController extends Handler {
      */
     private void onAllSubscriptionsLoaded() {
         if (DBG) log("onAllSubscriptionsLoaded");
+        mPrimarySubConfig.update();
         mSubInfoInitialized = true;
         updateDefaults(/*init*/ true);
         disableDataForNonDefaultNonOpportunisticSubscriptions();
@@ -406,6 +433,10 @@ public class MultiSimSettingController extends Handler {
                 mSubController.getDefaultSmsSubId(),
                 (newValue -> mSubController.setDefaultSmsSubId(newValue)));
 
+        //If data default sub isn't selected,we need set the default one,
+        //prevent users from forgetting to choose
+        accordingOperatorPolicySetDataSub();
+
         sendSubChangeNotificationIfNeeded(change, dataSelected, voiceSelected, smsSelected);
     }
 
@@ -496,8 +527,12 @@ public class MultiSimSettingController extends Handler {
         // user to select default for data as it's most important.
         if (mPrimarySubList.size() == 1 && change == PRIMARY_SUB_REMOVED
                 && (!dataSelected || !smsSelected || !voiceSelected)) {
-            dialogType = EXTRA_DEFAULT_SUBSCRIPTION_SELECT_TYPE_ALL;
-        } else if (mPrimarySubList.size() > 1 && isUserVisibleChange(change)) {
+            //UNISOC:After subscription occur hotswap,don't display preferred SIM dialog.
+//            dialogType = EXTRA_DEFAULT_SUBSCRIPTION_SELECT_TYPE_ALL;
+//            preferredSubId = mPrimarySubList.get(0);
+        } else if (mPrimarySubList.size() > 1
+                && isUserVisibleChange(change)
+                && (mPrimarySubConfig.isNeedPopupPrimaryCardSettingPrompt() || mContext.getResources().getBoolean(com.android.internal.R.bool.popup_primary_card_prompt))) {
             // If change is SWAPPED_IN_GROUP or MARKED_OPPT orINITIALIZED, don't ask user again.
             dialogType = EXTRA_DEFAULT_SUBSCRIPTION_SELECT_TYPE_DATA;
         }
@@ -553,9 +588,10 @@ public class MultiSimSettingController extends Handler {
         if (!mSubInfoInitialized) return;
 
         int defaultDataSub = mSubController.getDefaultDataSubId();
-
         for (Phone phone : PhoneFactory.getPhones()) {
             if (phone.getSubId() != defaultDataSub
+                    //UNISOC:The default data subId is invalid,don't need to close another sub's data enable.
+                    && SubscriptionManager.isValidSubscriptionId(defaultDataSub)
                     && SubscriptionManager.isValidSubscriptionId(phone.getSubId())
                     && !mSubController.isOpportunistic(phone.getSubId())
                     && phone.isUserDataEnabled()
@@ -652,6 +688,129 @@ public class MultiSimSettingController extends Handler {
         }
 
         return SubscriptionManager.isValidSubscriptionId(newValue);
+    }
+
+    /**
+     * Start to set primary sub According to Icc Policy.
+     */
+    private void accordingOperatorPolicySetDataSub() {
+        final Resources res = mContext.getResources();
+        int currentPrimarySub = mSubController.getDefaultDataSubId();
+        boolean isCurrentPrimarySubActive = mSubController.isActiveSubId(currentPrimarySub)
+                && mSubController.isSubscriptionEnabled(currentPrimarySub);
+        boolean isForceAutoSetPrimaryCard = res.getBoolean(com.android.internal.R.bool.force_auto_set_primary_sub_after_hot_swap);
+        int primaryPhoneId = mPrimarySubConfig.getPreferredPrimaryCard();
+        log("onSetPrimaryCardPrepared: isHotSwap = " + mHotSwap + " isCurrentPrimarySubActive = "
+                + isCurrentPrimarySubActive + ",currentPrimarySub = " + currentPrimarySub + ",mIsIccChanged = " + mIsIccChanged);
+
+        /*UNISOC: Bug1111279,when hotSwap SIM1/SIM2,the default data subId don't need to changed. @{*/
+        if (isCurrentPrimarySubActive
+                && mSubController.getActiveSubIdList(false).length == TelephonyManager.getDefault().getPhoneCount()
+                && !isForceAutoSetPrimaryCard) {
+            return;
+        }
+        /*UNISOC: @} */
+        if (PrimarySubConfig.isFixedSlot() && mSimStateTracker.isAllSimLoaded()) {
+            primaryPhoneId = res.getInteger(com.android.internal.R.integer.fixed_primary_slot_int);
+        }
+        int primarySubId = mSubController.getSubIdUsingPhoneId(primaryPhoneId);
+        // By default, do not automatically set primary sub if current one is
+        // active after hot-swap.
+        if (necessarySetPrimaryCard(isCurrentPrimarySubActive,mHotSwap)
+                || !isCurrentPrimarySubActive
+                || isForceAutoSetPrimaryCard
+                || (mIsIccChanged && !mHotSwap)) {
+            log("[onSetPrimaryCardPrepared] setPrimaryCard: phoneId = " + primaryPhoneId
+                    + " subId = " + primarySubId);
+            if (SubscriptionManager.isValidSubscriptionId(primarySubId)) {
+                mSubController.setDefaultDataSubId(primarySubId);
+                // Pop up SIM settings screen to prompt users it's available to
+                // set primary sub manually.
+                if (mPrimarySubConfig.isNeedPopupPrimaryCardSettingPrompt()
+                        // Modify for Bug967820,hotswap SIM1 occasionally pop up the SIM card settings.
+                        && mSimStateTracker.getPresentCardCount() > 1
+                        && !mHotSwap
+                        && mIsIccChanged
+                        && !mSimStateTracker.hasSimLocked()) {
+                    if (isDeviceProvisioned()) {
+                        popUpSimSettingsScreen();
+                    } else {
+                        log("Device is not provisioned, pop up data dialog later.");
+                        mNeedPopUpSimSettings = true;
+                    }
+                }
+            } else if (mSubController.getActiveSubIdList(false).length > 0) {
+                mSubController.setDefaultDataSubId(mSubController.getActiveSubIdList(false)[0]);
+            }
+        }
+        mIsFirstRun = false;
+    }
+
+    //UNISOC:Modify for Bug913376,when disable and enable SIM1/SIM2,the default data subId don't need to changed.
+    private boolean necessarySetPrimaryCard(boolean isCurrentPrimaryCardActive, boolean isHotSwap) {
+        if (!isHotSwap) {
+            log("necessarySetPrimaryCard: isFirstRun=" + mIsFirstRun);
+            if (isCurrentPrimaryCardActive && !mIsFirstRun
+                    && mSubController.getActiveSubIdList(true).length == TelephonyManager.getDefault().getPhoneCount()) {
+                return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isDeviceProvisioned() {
+        return Settings.Global.getInt(mContext.getContentResolver(),
+                Settings.Global.DEVICE_PROVISIONED, 0) != 0;
+    }
+
+    private ContentObserver mSetupWizardCompleteObserver = new ContentObserver(new Handler()) {
+        public void onChange(boolean selfChange) {
+            super.onChange(selfChange);
+            int defaultVoicePhoneId = SubscriptionManager.getDefaultVoicePhoneId();
+            log("mSetupWizardCompleteObserver : isDeviceProvisioned = " + isDeviceProvisioned()
+                    + "defaultVoicePhoneId = " + defaultVoicePhoneId);
+
+            if (isDeviceProvisioned() && mNeedPopUpSimSettings) {
+                popUpSimSettingsScreen();
+                mNeedPopUpSimSettings = false;
+            }
+        };
+    };
+
+    private ContentObserver mRadioBusyObserver = new ContentObserver(new Handler()) {
+        public void onChange(boolean selfChange) {
+            super.onChange(selfChange);
+            log("Radio busy changed: " + TeleUtils.isRadioBusy(mContext));
+            if (!TeleUtils.isRadioBusy(mContext)) {
+                accordingOperatorPolicySetDataSub();
+            }
+        };
+    };
+
+    private void popUpSimSettingsScreen() {
+        Intent intent = new Intent();
+        intent.setAction(ACTION_PRIMARY_SUBSCRIPTION_LIST_CHANGED);
+        intent.setClassName("com.android.settings",
+                "com.android.settings.sim.SimSelectNotification");
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_RECEIVER_FOREGROUND);
+        intent.putExtra(EXTRA_DEFAULT_SUBSCRIPTION_SELECT_TYPE,
+                EXTRA_DEFAULT_SUBSCRIPTION_SELECT_TYPE_DATA);
+        mContext.sendBroadcast(intent);
+        mIsIccChanged = false;
+    }
+
+    @Override
+    public void onSimHotSwaped(int phoneId) {
+        log("onSimHotSwaped.");
+        mHotSwap = true;
+        mIsIccChanged = true;
+    }
+
+    @Override
+    public void onAllSimDetected(boolean isIccChanged) {
+        log("onAllSimDetected. isIccChanged = " + isIccChanged);
+        mIsIccChanged = isIccChanged;
     }
 
     private void log(String msg) {

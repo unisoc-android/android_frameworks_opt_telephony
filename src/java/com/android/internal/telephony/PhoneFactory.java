@@ -46,6 +46,7 @@ import com.android.internal.telephony.sip.SipPhone;
 import com.android.internal.telephony.sip.SipPhoneFactory;
 import com.android.internal.telephony.uicc.UiccController;
 import com.android.internal.telephony.util.NotificationChannelController;
+import com.android.internal.telephony.OperatorNameHandler;
 import com.android.internal.util.IndentingPrintWriter;
 
 import java.io.FileDescriptor;
@@ -174,7 +175,7 @@ public class PhoneFactory {
                 Rlog.i(LOG_TAG, "Creating SubscriptionController");
                 SubscriptionController.init(context, sCommandsInterfaces);
                 MultiSimSettingController.init(context, SubscriptionController.getInstance());
-
+                OperatorNameHandler.init(context);
                 if (context.getPackageManager().hasSystemFeature(
                         PackageManager.FEATURE_TELEPHONY_EUICC)) {
                     sEuiccController = EuiccController.init(context);
@@ -185,12 +186,18 @@ public class PhoneFactory {
                     Phone phone = null;
                     int phoneType = TelephonyManager.getPhoneType(networkModes[i]);
                     if (phoneType == PhoneConstants.PHONE_TYPE_GSM) {
-                        phone = new GsmCdmaPhone(context,
+                        /*UNISOC: modify for IMS
+                          @Orig:phone = new GsmCdmaPhoneEx(context,{*/
+                        phone = new GsmCdmaPhoneEx(context,
+                        /*@}*/
                                 sCommandsInterfaces[i], sPhoneNotifier, i,
                                 PhoneConstants.PHONE_TYPE_GSM,
                                 TelephonyComponentFactory.getInstance());
                     } else if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
-                        phone = new GsmCdmaPhone(context,
+                        /*UNISOC: modify for IMS
+                          @Orig:phone = new GsmCdmaPhoneEx(context,{*/
+                        phone = new GsmCdmaPhoneEx(context,
+                        /*@}*/
                                 sCommandsInterfaces[i], sPhoneNotifier, i,
                                 PhoneConstants.PHONE_TYPE_CDMA_LTE,
                                 TelephonyComponentFactory.getInstance());

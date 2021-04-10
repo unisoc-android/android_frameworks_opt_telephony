@@ -538,6 +538,17 @@ public class DataConnection extends StateMachine {
 
         if (apn == null || lp == null) return;
 
+        int mtu = PhoneConstants.UNSET_MTU;
+        int mtuForIpv6 = PhoneConstants.UNSET_MTU;
+
+        mtuForIpv6 = SubscriptionManager.getResourcesForSubId(
+                mPhone.getContext(), mPhone.getSubId())
+                .getInteger(com.android.internal.R.integer.mtu_config_for_IPV6);
+        if (mtuForIpv6 != PhoneConstants.UNSET_MTU) {
+            log ("MTU set by config resource to mtuForIpv6: " + mtuForIpv6);
+            lp.setIPv6Mtu(mtuForIpv6);
+        }
+
         if (lp.getMtu() != PhoneConstants.UNSET_MTU) {
             if (DBG) log("MTU set by call response to: " + lp.getMtu());
             return;
@@ -549,8 +560,9 @@ public class DataConnection extends StateMachine {
             return;
         }
 
-        int mtu = mPhone.getContext().getResources().getInteger(
-                com.android.internal.R.integer.config_mobile_mtu);
+        mtu = SubscriptionManager.getResourcesForSubId(
+                mPhone.getContext(), mPhone.getSubId())
+                .getInteger(com.android.internal.R.integer.config_mobile_mtu);
         if (mtu != PhoneConstants.UNSET_MTU) {
             lp.setMtu(mtu);
             if (DBG) log("MTU set by config resource to: " + mtu);
@@ -1186,6 +1198,7 @@ public class DataConnection extends StateMachine {
                         result.addCapability(NetworkCapabilities.NET_CAPABILITY_CBS);
                         result.addCapability(NetworkCapabilities.NET_CAPABILITY_IA);
                         result.addCapability(NetworkCapabilities.NET_CAPABILITY_DUN);
+                        result.addCapability(NetworkCapabilities.NET_CAPABILITY_XCAP);
                         break;
                     }
                     case PhoneConstants.APN_TYPE_DEFAULT: {
@@ -1228,6 +1241,10 @@ public class DataConnection extends StateMachine {
                         result.addCapability(NetworkCapabilities.NET_CAPABILITY_MCX);
                         break;
                     }
+                    case PhoneConstants.APN_TYPE_XCAP: {
+                        result.addCapability(NetworkCapabilities.NET_CAPABILITY_XCAP);
+                        break;
+                    }
                     default:
                 }
             }
@@ -1250,6 +1267,14 @@ public class DataConnection extends StateMachine {
             // don't use dun on restriction-overriden networks.
             result.removeCapability(NetworkCapabilities.NET_CAPABILITY_DUN);
         }
+
+        /* UNISOC: Bug 589397 Adjust network capability when mobile data is disabled @{ */
+        // If mobile data is disabled, then remove INTERNET cap
+        if (!mPhone.getDataEnabledSettings().isDataEnabled(ApnSetting.TYPE_DEFAULT) ||
+                (mPhone.getServiceState().getDataRoaming() && !mDct.getDataRoamingEnabled())) {
+            result.removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        }
+        /* @} */
 
         int up = 14;
         int down = 14;
@@ -1623,17 +1648,31 @@ public class DataConnection extends StateMachine {
             mNetworkInfo.setDetailedState(NetworkInfo.DetailedState.SUSPENDED, null,
                     mNetworkInfo.getExtraInfo());
         } else {
-            // check for voice call and concurrency issues
-            if (sst.isConcurrentVoiceAndDataAllowed() == false) {
-                final CallTracker ct = mPhone.getCallTracker();
-                if (ct.getState() != PhoneConstants.State.IDLE) {
-                    mNetworkInfo.setDetailedState(NetworkInfo.DetailedState.SUSPENDED, null,
-                            mNetworkInfo.getExtraInfo());
-                    return;
+            Phone[] phones = PhoneFactory.getPhones();
+            Phone otherPhone = null;
+            for(Phone phone : phones) {
+                if (phone != mPhone) {
+                    otherPhone = phone;
                 }
             }
-            mNetworkInfo.setDetailedState(NetworkInfo.DetailedState.CONNECTED, null,
-                    mNetworkInfo.getExtraInfo());
+            if (otherPhone != null && otherPhone.getState() != PhoneConstants.State.IDLE ) {
+                log("other phone is in call,suspend data connection on this phone");
+                mNetworkInfo.setDetailedState(NetworkInfo.DetailedState.SUSPENDED, null,
+                        mNetworkInfo.getExtraInfo());
+                return;
+            } else {
+                // check for voice call and concurrency issues
+                if (sst.isConcurrentVoiceAndDataAllowed() == false) {
+                    /* UNISOC: bug599552 data icon shown under GSM when make emergency call @{ */
+                    if (mPhone.getState() != PhoneConstants.State.IDLE) {
+                        mNetworkInfo.setDetailedState(NetworkInfo.DetailedState.SUSPENDED, null,
+                                mNetworkInfo.getExtraInfo());
+                        return;
+                    }
+                }
+                mNetworkInfo.setDetailedState(NetworkInfo.DetailedState.CONNECTED, null,
+                        mNetworkInfo.getExtraInfo());
+            }
         }
     }
 
@@ -2770,6 +2809,18 @@ public class DataConnection extends StateMachine {
 
         return score;
     }
+
+    /* UNISOC:FEATURE_SUSPEND_DATA_WHEN_IN_CALL @{*/
+    public void sendSuspendMessage () {
+        log("send message:EVENT_DATA_CONNECTION_VOICE_CALL_STARTED to dataconnecition");
+        sendMessage(DataConnection.EVENT_DATA_CONNECTION_VOICE_CALL_STARTED);
+    }
+
+    public void sendResumeMessage () {
+        log("send EVENT_DATA_CONNECTION_VOICE_CALL_ENDED to dataconnecition");
+        sendMessage(DataConnection.EVENT_DATA_CONNECTION_VOICE_CALL_ENDED);
+    }
+    /* @} */
 
     /**
      * Dump the current state.

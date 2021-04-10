@@ -29,6 +29,7 @@ import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Resources;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -61,6 +62,7 @@ import com.android.internal.telephony.metrics.TelephonyMetrics;
 import com.android.internal.telephony.uicc.IccUtils;
 import com.android.internal.telephony.uicc.UiccCard;
 import com.android.internal.telephony.uicc.UiccController;
+import com.android.internal.telephony.TeleUtils;
 import com.android.internal.util.ArrayUtils;
 
 import java.io.FileDescriptor;
@@ -1126,7 +1128,10 @@ public class SubscriptionController extends ISub.Stub {
                             // Set the default sub if not set or if single sim device
                             if (!isSubscriptionForRemoteSim(subscriptionType)) {
                                 if (!SubscriptionManager.isValidSubscriptionId(defaultSubId)
-                                        || subIdCountMax == 1) {
+                                        || subIdCountMax == 1
+                                        /*UNISOC: Bug1162953 if defaultSubId sim is not exist ,reset it  @{ */
+                                        || !SubscriptionManager.isValidPhoneId(getPhoneId(mDefaultFallbackSubId))) {
+                                        /*UNISOC: Bug1162953 @} */
                                     logdl("setting default fallback subid to " + subId);
                                     setDefaultFallbackSubId(subId, subscriptionType);
                                 }
@@ -1199,6 +1204,15 @@ public class SubscriptionController extends ISub.Stub {
 
                 // Once the records are loaded, notify DcTracker
                 sPhones[slotIndex].updateDataConnectionTracker();
+                /* UNISOC: when intent SERVICE_STATE_CHANGED broadcast as device just reboot,
+                * it may not be recognized for invalid contained subId. This will cause
+                * UI display errouneous registration info untill state changed again.
+                * So trigger broadcast operation as siminfo is available. @{ */
+                if (DBG) {
+                    logdl("[addSubInfoRecord] update serviceState for subId:" + subId);
+                }
+                ((GsmCdmaPhone) sPhones[slotIndex]).notifyServiceStateChanged();
+                /* @} */
 
                 if (DBG) logdl("[addSubInfoRecord]- info size=" + sSlotIndexToSubIds.size());
             }
@@ -1571,8 +1585,16 @@ public class SubscriptionController extends ISub.Stub {
                 }
             }
             String nameToSet;
-            if (displayName == null) {
+            /* UNISOC: modify for bug1013040 @{ */
+            if (/*displayName == null*/TextUtils.isEmpty(displayName)) {
+                logd("user input displayname is null or null string.");
                 nameToSet = mContext.getString(SubscriptionManager.DEFAULT_NAME_RES);
+                if (SubscriptionManager.isValidSlotIndex(getSlotIndex(subId))) {
+                    nameToSet = "SIM " + Integer.toString(getSlotIndex(subId) + 1);
+                } else {
+                    return 0;
+                }
+                /* @} */
             } else {
                 nameToSet = displayName;
             }
@@ -2264,6 +2286,15 @@ public class SubscriptionController extends ISub.Stub {
             if (previousDefaultSub != getDefaultSubId()) {
                 sendDefaultChangedBroadcast(getDefaultSubId());
             }
+            /** UNISOC: Set the default voice subscription as the primary subscription. @{ */
+            Resources r = Resources.getSystem();
+            if (r.getBoolean(com.android.internal.R.bool.set_voice_sub_as_primary_sub_bool)) {
+                if (getActiveSubIdList(true).length > 1 && isActiveSubId(subId)) {
+                    logd("setDefaultVoiceSubId as default data subId: " + subId);
+                    setDefaultVoiceSubId(subId);
+                }
+            }
+            /** @} */
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
